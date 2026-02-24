@@ -1,6 +1,9 @@
 import logging
 import sqlite3
 import asyncio
+import os
+import csv
+import io
 from datetime import datetime
 from typing import Optional
 
@@ -222,7 +225,8 @@ async def cmd_new_event(message: types.Message):
                 f"🔗 Ссылка для поста в канале:\n"
                 f"<code>{bot_link}</code>\n\n"
                 f"📊 Статистика будет доступна по команде:\n"
-                f"/stats {code}"
+                f"/stats {code}\n"
+                f"📥 Экспорт в Excel: /export {code}"
             )
             
             await message.reply(response)
@@ -302,10 +306,71 @@ async def cmd_list_events(message: types.Message):
             f"   Код: {event['code']}\n"
             f"   Участников: {count}\n"
             f"   Создан: {event['created_at'][:16]}\n"
-            f"   /stats {event['code']}\n\n"
+            f"   /stats {event['code']}\n"
+            f"   /export {event['code']}\n\n"
         )
     
     await message.reply(response)
+
+# ==================== ЭКСПОРТ В CSV ====================
+@dp.message(Command("export"))
+async def cmd_export_csv(message: types.Message):
+    """Экспорт регистраций в CSV (только для админа)"""
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ У вас нет прав на выполнение этой команды.")
+        return
+    
+    # Получаем код эфира
+    command_parts = message.text.split()
+    if len(command_parts) < 2:
+        await message.reply("❌ Укажите код эфира. Пример: /export may2025")
+        return
+    
+    event_code = command_parts[1]
+    
+    # Получаем данные
+    registrations = export_event_registrations(event_code)
+    
+    if not registrations:
+        await message.reply(f"📭 На эфир с кодом '{event_code}' никто не зарегистрировался")
+        return
+    
+    # Создаем CSV файл в памяти
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Заголовки столбцов
+    writer.writerow([
+        'Имя', 
+        'Телефон', 
+        'Профессия', 
+        'Telegram Username', 
+        'Дата регистрации',
+        'ID пользователя'
+    ])
+    
+    # Данные
+    for reg in registrations:
+        writer.writerow([
+            reg['full_name'],
+            reg['phone'],
+            reg['profession'],
+            f"@{reg['username']}" if reg['username'] else '-',
+            reg['registered_at'][:16],
+            reg['user_id']
+        ])
+    
+    # Получаем название эфира
+    event_title = registrations[0]['event_title']
+    
+    # Отправляем файл
+    await message.reply_document(
+        document=io.BytesIO(output.getvalue().encode('utf-8-sig')),
+        filename=f"registrations_{event_code}.csv",
+        caption=f"📊 Экспорт регистраций на эфир:\n{event_title}\n"
+                f"📌 Код: {event_code}\n"
+                f"👥 Всего участников: {len(registrations)}"
+    )
 
 # ==================== РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ ====================
 @dp.message(Command("start"))
@@ -476,7 +541,8 @@ async def complete_registration(message: types.Message, state: FSMContext, profe
                     f"📞 Телефон: {data['phone']}\n"
                     f"💼 Кто: {profession}\n"
                     f"🆔 @{username if username else 'нет username'}\n"
-                    f"📊 Всего на эфире: {reg_count}"
+                    f"📊 Всего на эфире: {reg_count}\n"
+                    f"📥 Экспорт: /export {data['event_code']}"
                 )
             except:
                 pass
@@ -488,16 +554,19 @@ async def complete_registration(message: types.Message, state: FSMContext, profe
     
     await state.clear()
 
+# ==================== КОМАНДА ОТМЕНЫ (ИСПРАВЛЕНО) ====================
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
-    """Отмена текущего действия"""
+    """Отмена текущего действия (работает всегда)"""
     current_state = await state.get_state()
+    
     if current_state is None:
+        await message.reply("❌ Нет активной регистрации для отмены.")
         return
     
     await state.clear()
     await message.reply(
-        "❌ Регистрация отменена.",
+        "✅ Регистрация отменена.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -512,6 +581,7 @@ async def main():
     print("/new КОД | НАЗВАНИЕ | ССЫЛКА - создать эфир")
     print("/events - список всех эфиров")
     print("/stats КОД - статистика по эфиру")
+    print("/export КОД - выгрузить в Excel (CSV)")
     print("\n👤 Команды пользователей:")
     print("/start - начать работу с ботом")
     print("/cancel - отменить регистрацию")
