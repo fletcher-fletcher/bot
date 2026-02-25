@@ -4,6 +4,9 @@ import asyncio
 import os
 import csv
 import io
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 from datetime import datetime
 from typing import Optional
 
@@ -12,14 +15,14 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8379899619:AAFZm9gC4r8nbZ0j_Xe7DzrbRKSxyi7_UlI"  # Замените на токен от @BotFather
-ADMIN_IDS = [5333876901]  # Замените на ваш Telegram ID
+BOT_TOKEN = "8781874817:AAHLeiKjpLEe41ADa3NMUQCqqcTfitQZV2c"  
+ADMIN_IDS = [628687487, 5853079155]  
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 logging.basicConfig(level=logging.INFO)
@@ -226,7 +229,8 @@ async def cmd_new_event(message: types.Message):
                 f"<code>{bot_link}</code>\n\n"
                 f"📊 Статистика будет доступна по команде:\n"
                 f"/stats {code}\n"
-                f"📥 Экспорт в Excel: /export {code}"
+                f"📥 CSV: /csv {code}\n"
+                f"📥 Excel: /xls {code}"
             )
             
             await message.reply(response)
@@ -307,13 +311,14 @@ async def cmd_list_events(message: types.Message):
             f"   Участников: {count}\n"
             f"   Создан: {event['created_at'][:16]}\n"
             f"   /stats {event['code']}\n"
-            f"   /export {event['code']}\n\n"
+            f"   /csv {event['code']}\n"
+            f"   /xls {event['code']}\n\n"
         )
     
     await message.reply(response)
 
 # ==================== ЭКСПОРТ В CSV ====================
-@dp.message(Command("export"))
+@dp.message(Command("csv"))
 async def cmd_export_csv(message: types.Message):
     """Экспорт регистраций в CSV (только для админа)"""
     if message.from_user.id not in ADMIN_IDS:
@@ -323,7 +328,7 @@ async def cmd_export_csv(message: types.Message):
     # Получаем код эфира
     command_parts = message.text.split()
     if len(command_parts) < 2:
-        await message.reply("❌ Укажите код эфира. Пример: /export may2025")
+        await message.reply("❌ Укажите код эфира. Пример: /csv may2025")
         return
     
     event_code = command_parts[1]
@@ -335,19 +340,15 @@ async def cmd_export_csv(message: types.Message):
         await message.reply(f"📭 На эфир с кодом '{event_code}' никто не зарегистрировался")
         return
     
-    # Создаем CSV файл в памяти
+    # Получаем название эфира
+    event_title = registrations[0]['event_title']
+    
+    # СОЗДАЕМ CSV ФАЙЛ
     output = io.StringIO()
     writer = csv.writer(output)
     
-    # Заголовки столбцов
-    writer.writerow([
-        'Имя', 
-        'Телефон', 
-        'Профессия', 
-        'Telegram Username', 
-        'Дата регистрации',
-        'ID пользователя'
-    ])
+    # Заголовки
+    writer.writerow(['Имя', 'Телефон', 'Профессия', 'Telegram Username', 'Дата регистрации', 'ID пользователя'])
     
     # Данные
     for reg in registrations:
@@ -360,17 +361,118 @@ async def cmd_export_csv(message: types.Message):
             reg['user_id']
         ])
     
-    # Получаем название эфира
-    event_title = registrations[0]['event_title']
+    # Получаем байты CSV
+    csv_bytes = output.getvalue().encode('utf-8-sig')
     
-    # Отправляем файл
+    # СОЗДАЕМ ФАЙЛ ДЛЯ ОТПРАВКИ
+    file = BufferedInputFile(
+        file=csv_bytes,
+        filename=f"registrations_{event_code}.csv"
+    )
+    
+    # ОТПРАВЛЯЕМ ФАЙЛ
     await message.reply_document(
-        document=io.BytesIO(output.getvalue().encode('utf-8-sig')),
-        filename=f"registrations_{event_code}.csv",
-        caption=f"📊 Экспорт регистраций на эфир:\n{event_title}\n"
+        document=file,
+        caption=f"📊 CSV-экспорт по эфиру:\n{event_title}\n"
                 f"📌 Код: {event_code}\n"
                 f"👥 Всего участников: {len(registrations)}"
     )
+
+# ==================== ЭКСПОРТ В EXCEL ====================
+@dp.message(Command("xls"))
+async def cmd_export_xls(message: types.Message):
+    """Экспорт регистраций в Excel (только для админа)"""
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ У вас нет прав на выполнение этой команды.")
+        return
+    
+    # Получаем код эфира
+    command_parts = message.text.split()
+    if len(command_parts) < 2:
+        await message.reply("❌ Укажите код эфира. Пример: /xls may2025")
+        return
+    
+    event_code = command_parts[1]
+    
+    # Получаем данные
+    registrations = export_event_registrations(event_code)
+    
+    if not registrations:
+        await message.reply(f"📭 На эфир с кодом '{event_code}' никто не зарегистрировался")
+        return
+    
+    try:
+        # Создаем Excel файл
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = f"Эфир {event_code}"
+        
+        # Заголовки
+        headers = ['№', 'Имя', 'Телефон', 'Профессия', 'Telegram', 'Дата регистрации', 'ID пользователя']
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Данные
+        for row, reg in enumerate(registrations, 2):
+            ws.cell(row=row, column=1, value=row-1).alignment = Alignment(horizontal="center")
+            ws.cell(row=row, column=2, value=reg['full_name'])
+            ws.cell(row=row, column=3, value=reg['phone'])
+            ws.cell(row=row, column=4, value=reg['profession'])
+            ws.cell(row=row, column=5, value=f"@{reg['username']}" if reg['username'] else "-")
+            ws.cell(row=row, column=6, value=reg['registered_at'][:16])
+            ws.cell(row=row, column=7, value=reg['user_id'])
+        
+        # Автоподбор ширины колонок
+        for col in range(1, len(headers) + 1):
+            column_letter = get_column_letter(col)
+            max_length = 0
+            for row in range(1, len(registrations) + 2):
+                cell_value = ws[f"{column_letter}{row}"].value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+        
+        # Добавляем границы
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        for row in range(1, len(registrations) + 2):
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row, column=col).border = thin_border
+        
+        # Сохраняем в память
+        excel_bytes = io.BytesIO()
+        wb.save(excel_bytes)
+        excel_bytes.seek(0)
+        
+        # Получаем название эфира
+        event_title = registrations[0]['event_title']
+        
+        # Создаем файл для отправки
+        file = BufferedInputFile(
+            file=excel_bytes.getvalue(),
+            filename=f"registrations_{event_code}.xlsx"
+        )
+        
+        # Отправляем файл
+        await message.reply_document(
+            document=file,
+            caption=f"📊 Excel-отчет по эфиру:\n{event_title}\n"
+                    f"📌 Код: {event_code}\n"
+                    f"👥 Всего участников: {len(registrations)}"
+        )
+        
+    except ImportError:
+        await message.reply("❌ Библиотека openpyxl не установлена. Установите: pip install openpyxl")
+    except Exception as e:
+        await message.reply(f"❌ Ошибка при создании Excel: {e}")
 
 # ==================== РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ ====================
 @dp.message(Command("start"))
@@ -542,7 +644,8 @@ async def complete_registration(message: types.Message, state: FSMContext, profe
                     f"💼 Кто: {profession}\n"
                     f"🆔 @{username if username else 'нет username'}\n"
                     f"📊 Всего на эфире: {reg_count}\n"
-                    f"📥 Экспорт: /export {data['event_code']}"
+                    f"📥 CSV: /csv {data['event_code']}\n"
+                    f"📥 Excel: /xls {data['event_code']}"
                 )
             except:
                 pass
@@ -554,7 +657,7 @@ async def complete_registration(message: types.Message, state: FSMContext, profe
     
     await state.clear()
 
-# ==================== КОМАНДА ОТМЕНЫ (ИСПРАВЛЕНО) ====================
+# ==================== КОМАНДА ОТМЕНЫ ====================
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     """Отмена текущего действия (работает всегда)"""
@@ -581,7 +684,8 @@ async def main():
     print("/new КОД | НАЗВАНИЕ | ССЫЛКА - создать эфир")
     print("/events - список всех эфиров")
     print("/stats КОД - статистика по эфиру")
-    print("/export КОД - выгрузить в Excel (CSV)")
+    print("/csv КОД - выгрузить в CSV")
+    print("/xls КОД - выгрузить в Excel")
     print("\n👤 Команды пользователей:")
     print("/start - начать работу с ботом")
     print("/cancel - отменить регистрацию")
